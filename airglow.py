@@ -9,7 +9,7 @@ import utilities as utils
 # airglow function runs about 5x faster if the code instantiates this object now rather than within the function
 voigt = Voigt1D()
 
-class AirglowModel(object):
+class MultiTraceAirglowModel(object):
     parameter_order = ['midpts', 'widths', 'fluxes', 'fwhm_Gs', 'fwhm_Ls', 'darkrates']
     n_params_per_trace = len(parameter_order)
     _1d_organization_string = (f"[param1_trace1, param1_trace2, ..., paramn_trace1, paramn_trace2] for an example with two "
@@ -24,7 +24,7 @@ class AirglowModel(object):
         ----------
         wavegrids : list of wavelength grids to be used in model evaluations during MCMC or other optimization
         dw_sample : grid spacing for supersampling of the airglow profile
-        plate_scale : factor enabling the scaling the slit width into a width in AA on the dispersion axis
+        plate_scale : factor enabling scaling the slit width into a width in AA on the dispersion axis
             This is the dispersion (AA/pixel) divided by the conventional plate scale (arcsec / pixel) yielding
             units of AA/arcsec
         tolerances : list of sigmas for priors tying the parameters of the fits to each trace to each other.

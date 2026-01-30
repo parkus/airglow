@@ -1,7 +1,7 @@
 import numpy as np
 from astropy.io import fits
 import utilities as utils
-from airglow import AirglowModel
+from airglow import MultiTraceAirglowModel
 from matplotlib import pyplot as plt
 
 def test_airglow_models(three_trace_files):
@@ -46,7 +46,7 @@ def test_airglow_models(three_trace_files):
 
         # set up a model with tight tolerances
         tolerances = np.array([0.1, 0.2, 4e-14, 0.2, 0.1, 1.0e-16]) * tol_rel
-        model = AirglowModel(wavegrids, 0.01, 1.838,
+        model = MultiTraceAirglowModel(wavegrids, 0.01, 1.838,
                              tolerances=tolerances, midpt_rng=[1215.3, 1216.3])
 
         ctstack = np.hstack(counts)
