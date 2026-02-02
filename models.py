@@ -340,19 +340,29 @@ def fit_gp_1d(x, y, yerr=None, smoothing=1.0, white_noise=1e-6, fit_white_noise=
             white_noise=np.log(white_noise ** 2),
             fit_white_noise=True,
         )
-
         def nll(p):
-            gp.set_parameter_vector(p)
-            gp.compute(x)
-            return -gp.log_likelihood(y)
-
-        def grad_nll(p):
-            gp.set_parameter_vector(p)
-            gp.compute(x)
-            return -gp.grad_log_likelihood(y)
+            try:
+                gp.set_parameter_vector(p)
+                gp.compute(x)
+                nll_val = -gp.log_likelihood(y)
+            except Exception as exc:
+                return 1.0e300
+            return nll_val
 
         p0 = gp.get_parameter_vector()
-        result = optimize.minimize(nll, p0, jac=grad_nll)
+        # Set conservative bounds to avoid numerical blow-ups
+        y_std = np.nanstd(y) if np.nanstd(y) > 0 else 1.0
+        mean_bounds = (np.nanmin(y) - 5.0 * y_std, np.nanmax(y) + 5.0 * y_std)
+        white_noise_floor = max(white_noise, 1e-8)
+        white_noise_ceil = max(y_std * 10.0, white_noise_floor * 10.0)
+        log_wn_bounds = (np.log(white_noise_floor ** 2), np.log(white_noise_ceil ** 2))
+        amp = np.var(y) if np.var(y) > 0 else 1.0
+        log_amp_bounds = (np.log(amp * 1e-6), np.log(amp * 1e6))
+        ls_floor = max(smoothing / 10.0, 1e-3)
+        ls_ceil = max(smoothing * 10.0, 1e-1)
+        log_ls_bounds = (np.log(ls_floor ** 2), np.log(ls_ceil ** 2))
+        bounds = [mean_bounds, log_wn_bounds, log_amp_bounds, log_ls_bounds]
+        result = optimize.minimize(nll, p0, method="L-BFGS-B", bounds=bounds)
         gp.set_parameter_vector(result.x)
         mean, _ = gp.predict(y, x, return_var=True)
         return gp, mean, result
