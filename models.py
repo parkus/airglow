@@ -2,6 +2,8 @@ from math import inf
 
 import numpy as np
 from astropy.modeling.functional_models import Voigt1D
+import george
+from george import kernels
 from scipy import optimize
 
 
@@ -292,4 +294,65 @@ def fit_airglow_rows(
         "keeps": np.array(keeps),
         "row_indices": np.array(row_indices),
     }
+
+
+def fit_gp_1d(x, y, yerr=None, smoothing=1.0, white_noise=1e-6, fit_white_noise=False):
+    """
+    Fit a 1D Gaussian Process to data with a tunable smoothing length scale.
+
+    Parameters
+    ----------
+    x : array-like
+        1D coordinate array.
+    y : array-like
+        1D data values.
+    yerr : array-like, optional
+        1D uncertainties; if None, uses white_noise.
+    smoothing : float, optional
+        Length scale for the kernel. Higher values => smoother GP.
+    white_noise : float, optional
+        White noise level when yerr is not provided.
+    fit_white_noise : bool, optional
+        If True, fit a white-noise term along with the GP kernel.
+
+    Returns
+    -------
+    gp : george.GP
+        Configured GP object.
+    mean : ndarray
+        GP mean prediction at x.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if yerr is None:
+        yerr = np.full_like(y, white_noise, dtype=float)
+    else:
+        yerr = np.asarray(yerr, dtype=float)
+
+    if fit_white_noise:
+        amplitude = np.var(y) if np.var(y) > 0 else 1.0
+        kernel = amplitude * kernels.ExpSquaredKernel(smoothing ** 2) + kernels.WhiteNoiseKernel(white_noise ** 2)
+        gp = george.GP(kernel)
+
+        def nll(p):
+            gp.set_parameter_vector(p)
+            gp.compute(x, yerr=0.0)
+            return -gp.log_likelihood(y)
+
+        def grad_nll(p):
+            gp.set_parameter_vector(p)
+            gp.compute(x, yerr=0.0)
+            return -gp.grad_log_likelihood(y)
+
+        p0 = gp.get_parameter_vector()
+        result = optimize.minimize(nll, p0, jac=grad_nll)
+        gp.set_parameter_vector(result.x)
+        mean, _ = gp.predict(y, x, return_var=True)
+        return gp, mean, result
+
+    kernel = kernels.ExpSquaredKernel(smoothing ** 2)
+    gp = george.GP(kernel)
+    gp.compute(x, yerr)
+    mean, _ = gp.predict(y, x, return_var=True)
+    return gp, mean
 
