@@ -296,7 +296,15 @@ def fit_airglow_rows(
     }
 
 
-def fit_gp_1d(x, y, yerr=None, smoothing=1.0, white_noise=1e-6, fit_white_noise=False):
+def fit_gp_1d(
+    x,
+    y,
+    yerr=None,
+    smoothing=1.0,
+    white_noise=1e-6,
+    fit_white_noise=False,
+    normalize=True,
+):
     """
     Fit a 1D Gaussian Process to data with a tunable smoothing length scale.
 
@@ -314,6 +322,8 @@ def fit_gp_1d(x, y, yerr=None, smoothing=1.0, white_noise=1e-6, fit_white_noise=
         White noise level when yerr is not provided.
     fit_white_noise : bool, optional
         If True, fit a white-noise term along with the GP kernel.
+    normalize : bool, optional
+        If True, normalize y to zero mean and unit variance before fitting.
 
     Returns
     -------
@@ -328,6 +338,13 @@ def fit_gp_1d(x, y, yerr=None, smoothing=1.0, white_noise=1e-6, fit_white_noise=
         yerr = np.full_like(y, white_noise, dtype=float)
     else:
         yerr = np.asarray(yerr, dtype=float)
+
+    y_mean = np.mean(y)
+    y_std = np.std(y) if np.std(y) > 0 else 1.0
+    if normalize:
+        y = (y - y_mean) / y_std
+        yerr = yerr / y_std
+        white_noise = white_noise / y_std
 
     amplitude = np.var(y) if np.var(y) > 0 else 1.0
     kernel = amplitude * kernels.ExpSquaredKernel(smoothing ** 2)
@@ -365,10 +382,14 @@ def fit_gp_1d(x, y, yerr=None, smoothing=1.0, white_noise=1e-6, fit_white_noise=
         result = optimize.minimize(nll, p0, method="L-BFGS-B", bounds=bounds)
         gp.set_parameter_vector(result.x)
         mean, _ = gp.predict(y, x, return_var=True)
+        if normalize:
+            mean = mean * y_std + y_mean
         return gp, mean, result
 
     gp = george.GP(kernel)
     gp.compute(x, yerr)
     mean, _ = gp.predict(y, x, return_var=True)
+    if normalize:
+        mean = mean * y_std + y_mean
     return gp, mean
 
