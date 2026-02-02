@@ -178,3 +178,84 @@ def fit_airglow_row(
     fit = model_row(result.x)
     return fit, result.x, keep
 
+
+def fit_airglow_rows(
+    rows,
+    x_grid,
+    roi_x0,
+    roi_x1,
+    row_indices=None,
+    dq_rows=None,
+    dq_mask_value=0,
+    lsf_kernel=None,
+    init=None,
+    bounds=([350, 2, 0, 0.1, 0.1], [450, 40, 1e6, 5.0, 5.0]),
+):
+    """
+    Fit the broadened boxcar model for multiple rows, seeding each fit
+    with the previous row's best-fit parameters.
+
+    Parameters
+    ----------
+    rows : array-like
+        2D array of rows to fit (shape: N_rows x N_x).
+    x_grid : array-like
+        1D pixel coordinate grid matching row length.
+    roi_x0, roi_x1 : int
+        Inclusive/exclusive ROI bounds for fitting.
+    row_indices : array-like, optional
+        Row indices corresponding to each row (for bookkeeping).
+    dq_rows : array-like, optional
+        DQ values for rows (shape: N_rows x N_x).
+    dq_mask_value : int, optional
+        Bitwise mask value indicating bad pixels.
+    lsf_kernel : array-like, optional
+        LSF kernel for additional convolution.
+    init : tuple, optional
+        Initial parameter guess for the first row.
+    bounds : tuple, optional
+        Bounds for parameters as (lower, upper).
+
+    Returns
+    -------
+    results : dict
+        Dictionary with keys: fits, params, keeps, row_indices.
+    """
+    rows = np.asarray(rows, dtype=float)
+    if rows.ndim == 1:
+        rows = rows[None, :]
+    if dq_rows is not None:
+        dq_rows = np.asarray(dq_rows, dtype=int)
+    if row_indices is None:
+        row_indices = list(range(rows.shape[0]))
+
+    fits = []
+    params_list = []
+    keeps = []
+    current_init = init
+
+    for i, row in enumerate(rows):
+        dq_row = dq_rows[i] if dq_rows is not None else None
+        fit, params, keep = fit_airglow_row(
+            row,
+            x_grid,
+            roi_x0,
+            roi_x1,
+            dq_row=dq_row,
+            dq_mask_value=dq_mask_value,
+            lsf_kernel=lsf_kernel,
+            init=current_init,
+            bounds=bounds,
+        )
+        fits.append(fit)
+        params_list.append(params)
+        keeps.append(keep)
+        current_init = params
+
+    return {
+        "fits": np.array(fits),
+        "params": np.array(params_list),
+        "keeps": np.array(keeps),
+        "row_indices": np.array(row_indices),
+    }
+
