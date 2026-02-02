@@ -329,19 +329,26 @@ def fit_gp_1d(x, y, yerr=None, smoothing=1.0, white_noise=1e-6, fit_white_noise=
     else:
         yerr = np.asarray(yerr, dtype=float)
 
+    amplitude = np.var(y) if np.var(y) > 0 else 1.0
+    kernel = amplitude * kernels.ExpSquaredKernel(smoothing ** 2)
+
     if fit_white_noise:
-        amplitude = np.var(y) if np.var(y) > 0 else 1.0
-        kernel = amplitude * kernels.ExpSquaredKernel(smoothing ** 2) + kernels.WhiteNoiseKernel(white_noise ** 2)
-        gp = george.GP(kernel)
+        gp = george.GP(
+            kernel,
+            mean=np.mean(y),
+            fit_mean=True,
+            white_noise=np.log(white_noise ** 2),
+            fit_white_noise=True,
+        )
 
         def nll(p):
             gp.set_parameter_vector(p)
-            gp.compute(x, yerr=0.0)
+            gp.compute(x)
             return -gp.log_likelihood(y)
 
         def grad_nll(p):
             gp.set_parameter_vector(p)
-            gp.compute(x, yerr=0.0)
+            gp.compute(x)
             return -gp.grad_log_likelihood(y)
 
         p0 = gp.get_parameter_vector()
@@ -350,7 +357,6 @@ def fit_gp_1d(x, y, yerr=None, smoothing=1.0, white_noise=1e-6, fit_white_noise=
         mean, _ = gp.predict(y, x, return_var=True)
         return gp, mean, result
 
-    kernel = kernels.ExpSquaredKernel(smoothing ** 2)
     gp = george.GP(kernel)
     gp.compute(x, yerr)
     mean, _ = gp.predict(y, x, return_var=True)
