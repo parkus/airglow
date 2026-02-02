@@ -95,7 +95,7 @@ def fit_airglow_row(
     dq_mask_value=0,
     lsf_kernel=None,
     init=None,
-    bounds=([350, 2, 0, 0.1, 0.1], [450, 40, 1e6, 5.0, 5.0]),
+    bounds=([0, 0, 0, 1e-5, 1e-5], [1024, 500, 1e10, 100, 100]),
 ):
     """
     Fit a broadened boxcar airglow model to a single row within an ROI.
