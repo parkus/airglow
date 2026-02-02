@@ -96,6 +96,9 @@ def fit_airglow_row(
     lsf_kernel=None,
     init=None,
     bounds=([0, 0, 0, 1e-5, 1e-5], [1024, 500, 1e10, 100, 100]),
+    fit_fwhm=True,
+    fixed_fwhm_g=1.0,
+    fixed_fwhm_l=0.5,
 ):
     """
     Fit a broadened boxcar airglow model to a single row within an ROI.
@@ -119,6 +122,12 @@ def fit_airglow_row(
         If None, uses estimate_airglow_initial_guess.
     bounds : tuple, optional
         Bounds for parameters as (lower, upper). Used as a penalty with Nelder-Mead.
+    fit_fwhm : bool, optional
+        If True, fit fwhm_g and fwhm_l. If False, use fixed values.
+    fixed_fwhm_g : float, optional
+        Fixed Gaussian FWHM when fit_fwhm is False.
+    fixed_fwhm_l : float, optional
+        Fixed Lorentzian FWHM when fit_fwhm is False.
 
     Returns
     -------
@@ -146,9 +155,14 @@ def fit_airglow_row(
         raise ValueError("No valid pixels to fit in the requested ROI.")
 
     def model_row(params):
-        centroid, width, amplitude, fwhm_g, fwhm_l = params
+        if fit_fwhm:
+            centroid, width, amplitude, fwhm_g, fwhm_l = params
+            return airglow_broadened_boxcar_row(
+                x_roi, centroid, width, amplitude, fwhm_g, fwhm_l, lsf_kernel=lsf_kernel
+            )
+        centroid, width, amplitude = params
         return airglow_broadened_boxcar_row(
-            x_roi, centroid, width, amplitude, fwhm_g, fwhm_l, lsf_kernel=lsf_kernel
+            x_roi, centroid, width, amplitude, fixed_fwhm_g, fixed_fwhm_l, lsf_kernel=lsf_kernel
         )
 
     def residuals(params):
@@ -160,8 +174,16 @@ def fit_airglow_row(
         centroid_guess, width_guess, amplitude_guess = estimate_airglow_initial_guess(
             x_roi, row_roi, keep
         )
-        init = (centroid_guess, width_guess, amplitude_guess, 1.0, 0.5)
+        if fit_fwhm:
+            init = (centroid_guess, width_guess, amplitude_guess, fixed_fwhm_g, fixed_fwhm_l)
+        else:
+            init = (centroid_guess, width_guess, amplitude_guess)
     init = np.asarray(init, dtype=float)
+    if not fit_fwhm:
+        lower = lower[:3]
+        upper = upper[:3]
+        if init.shape[0] != 3:
+            init = init[:3]
 
     def objective(params):
         params = np.asarray(params, dtype=float)
@@ -190,6 +212,9 @@ def fit_airglow_rows(
     lsf_kernel=None,
     init=None,
     bounds=([350, 2, 0, 0.1, 0.1], [450, 40, 1e6, 5.0, 5.0]),
+    fit_fwhm=True,
+    fixed_fwhm_g=1.0,
+    fixed_fwhm_l=0.5,
 ):
     """
     Fit the broadened boxcar model for multiple rows, seeding each fit
@@ -215,6 +240,12 @@ def fit_airglow_rows(
         Initial parameter guess for the first row.
     bounds : tuple, optional
         Bounds for parameters as (lower, upper).
+    fit_fwhm : bool, optional
+        If True, fit fwhm_g and fwhm_l. If False, use fixed values.
+    fixed_fwhm_g : float, optional
+        Fixed Gaussian FWHM when fit_fwhm is False.
+    fixed_fwhm_l : float, optional
+        Fixed Lorentzian FWHM when fit_fwhm is False.
 
     Returns
     -------
@@ -246,6 +277,9 @@ def fit_airglow_rows(
             lsf_kernel=lsf_kernel,
             init=current_init,
             bounds=bounds,
+            fit_fwhm=fit_fwhm,
+            fixed_fwhm_g=fixed_fwhm_g,
+            fixed_fwhm_l=fixed_fwhm_l,
         )
         fits.append(fit)
         params_list.append(params)
