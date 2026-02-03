@@ -1,10 +1,9 @@
-from math import inf
-
 import numpy as np
 from astropy.modeling.functional_models import Voigt1D
 import george
 from george import kernels
 from scipy import optimize
+from scipy.special import gammaln
 
 
 _voigt = Voigt1D()
@@ -124,6 +123,8 @@ def fit_airglow_row(
         If None, uses estimate_airglow_initial_guess.
     bounds : tuple, optional
         Bounds for parameters as (lower, upper). Used as a penalty with Nelder-Mead.
+        The fit uses a Poisson log-likelihood with model values as the mean counts.
+        Data are rounded to nearest integer and clipped at zero for Poisson evaluation.
     fit_fwhm : bool, optional
         If True, fit fwhm_g and fwhm_l. If False, use fixed values.
     fixed_fwhm_g : float, optional
@@ -167,9 +168,16 @@ def fit_airglow_row(
             x_roi, centroid, width, amplitude, fixed_fwhm_g, fixed_fwhm_l, lsf_kernel=lsf_kernel
         )
 
-    def residuals(params):
-        model = model_row(params)
-        return model[keep] - row_roi[keep]
+    def neg_loglike(params):
+        model = model_row(params)[keep]
+        data = row_roi[keep]
+        # handle non-integer and negative counts for Poisson stats
+        counts = np.rint(data)
+        counts = np.clip(counts, 0, None)
+        if np.any(model <= 0):
+            return 1e300
+        loglike = counts * np.log(model) - model - gammaln(counts + 1)
+        return -np.sum(loglike)
 
     lower, upper = np.asarray(bounds[0], dtype=float), np.asarray(bounds[1], dtype=float)
     if init is None:
@@ -190,9 +198,8 @@ def fit_airglow_row(
     def objective(params):
         params = np.asarray(params, dtype=float)
         if np.any(params < lower) or np.any(params > upper):
-            return inf
-        res = residuals(params)
-        return np.sum(res ** 2)
+            return 1e300
+        return neg_loglike(params)
 
     result = optimize.minimize(
         objective,
@@ -346,7 +353,7 @@ def fit_gp_1d(x, y, yerr=None, smoothing=1.0, white_noise=1e-6, fit_white_noise=
                 gp.compute(x)
                 nll_val = -gp.log_likelihood(y)
             except Exception as exc:
-                return 1.0e300
+                return 1e300
             return nll_val
 
         p0 = gp.get_parameter_vector()
