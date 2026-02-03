@@ -3,6 +3,7 @@ from astropy.modeling.functional_models import Voigt1D
 import george
 from george import kernels
 from scipy import optimize
+from scipy.interpolate import Rbf
 from scipy.special import gammaln
 
 
@@ -319,6 +320,161 @@ def fit_airglow_rows(
         "params": np.array(params_list),
         "keeps": np.array(keeps),
         "row_indices": np.array(row_indices),
+    }
+
+
+def fit_poly_surface_2d(data, roi, order=2, mask=None, weights=None):
+    """
+    Fit a 2D polynomial surface to an ROI.
+
+    Parameters
+    ----------
+    data : array-like
+        2D image data.
+    roi : tuple
+        ROI bounds as (y0, y1, x0, x1) or ((y0, y1), (x0, x1)).
+    order : int, optional
+        Polynomial order (total degree). Default is 2.
+    mask : array-like, optional
+        Boolean mask for data; True values are excluded from the fit.
+        Can be full-image shape or ROI shape.
+    weights : array-like, optional
+        Weights per pixel. Can be full-image shape or ROI shape.
+
+    Returns
+    -------
+    result : dict
+        Dictionary with keys: coeffs, powers, model, center, roi, keep.
+    """
+    data = np.asarray(data, dtype=float)
+    if len(roi) == 2 and len(roi[0]) == 2 and len(roi[1]) == 2:
+        (y0, y1), (x0, x1) = roi
+    else:
+        y0, y1, x0, x1 = roi
+
+    roi_data = data[y0:y1, x0:x1]
+    y_grid, x_grid = np.indices(roi_data.shape, dtype=float)
+    y_center = np.nanmean(y_grid)
+    x_center = np.nanmean(x_grid)
+    y = y_grid - y_center
+    x = x_grid - x_center
+
+    keep = np.isfinite(roi_data)
+    if mask is not None:
+        mask_arr = np.asarray(mask, dtype=bool)
+        if mask_arr.shape == data.shape:
+            mask_arr = mask_arr[y0:y1, x0:x1]
+        elif mask_arr.shape != roi_data.shape:
+            raise ValueError("Mask must match ROI shape or full image shape.")
+        keep &= ~mask_arr
+
+    roi_weights = None
+    if weights is not None:
+        weights_arr = np.asarray(weights, dtype=float)
+        if weights_arr.shape == data.shape:
+            roi_weights = weights_arr[y0:y1, x0:x1]
+        elif weights_arr.shape == roi_data.shape:
+            roi_weights = weights_arr
+        else:
+            raise ValueError("Weights must match ROI shape or full image shape.")
+        keep &= np.isfinite(roi_weights) & (roi_weights > 0)
+
+    if not np.any(keep):
+        raise ValueError("No valid pixels to fit in the requested ROI.")
+
+    powers = []
+    terms = []
+    for i in range(order + 1):
+        for j in range(order + 1 - i):
+            powers.append((i, j))
+            terms.append((x ** i) * (y ** j))
+
+    A = np.stack([term[keep] for term in terms], axis=1)
+    b = roi_data[keep]
+
+    if roi_weights is not None:
+        w = roi_weights[keep]
+        A = A * w[:, None]
+        b = b * w
+
+    coeffs, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+
+    model = np.zeros_like(roi_data)
+    for coeff, (i, j) in zip(coeffs, powers):
+        model += coeff * (x ** i) * (y ** j)
+
+    return {
+        "coeffs": coeffs,
+        "powers": np.array(powers, dtype=int),
+        "model": model,
+        "center": (y_center, x_center),
+        "roi": (y0, y1, x0, x1),
+        "keep": keep,
+    }
+
+
+def fit_rbf_surface_2d(data, roi, mask=None, function="thin_plate", smooth=0.0, epsilon=None):
+    """
+    Fit a 2D radial basis function (RBF) surface to an ROI.
+
+    Parameters
+    ----------
+    data : array-like
+        2D image data.
+    roi : tuple
+        ROI bounds as (y0, y1, x0, x1) or ((y0, y1), (x0, x1)).
+    mask : array-like, optional
+        Boolean mask for data; True values are excluded from the fit.
+        Can be full-image shape or ROI shape.
+    function : str, optional
+        RBF kernel type (e.g., "thin_plate", "multiquadric", "linear").
+    smooth : float, optional
+        Smoothing parameter passed to scipy.interpolate.Rbf.
+    epsilon : float, optional
+        Shape parameter for some RBF kernels.
+
+    Returns
+    -------
+    result : dict
+        Dictionary with keys: rbf, model, roi, keep.
+    """
+    data = np.asarray(data, dtype=float)
+    if len(roi) == 2 and len(roi[0]) == 2 and len(roi[1]) == 2:
+        (y0, y1), (x0, x1) = roi
+    else:
+        y0, y1, x0, x1 = roi
+
+    roi_data = data[y0:y1, x0:x1]
+    y_grid, x_grid = np.indices(roi_data.shape, dtype=float)
+
+    keep = np.isfinite(roi_data)
+    if mask is not None:
+        mask_arr = np.asarray(mask, dtype=bool)
+        if mask_arr.shape == data.shape:
+            mask_arr = mask_arr[y0:y1, x0:x1]
+        elif mask_arr.shape != roi_data.shape:
+            raise ValueError("Mask must match ROI shape or full image shape.")
+        keep &= ~mask_arr
+
+    if not np.any(keep):
+        raise ValueError("No valid pixels to fit in the requested ROI.")
+
+    x = x_grid[keep]
+    y = y_grid[keep]
+    z = roi_data[keep]
+
+    if epsilon is None:
+        rbf = Rbf(x, y, z, function=function, smooth=smooth)
+    else:
+        rbf = Rbf(x, y, z, function=function, smooth=smooth, epsilon=epsilon)
+
+    model = rbf(x_grid, y_grid)
+
+    return {
+        "rbf": rbf,
+        "model": model,
+        "roi": (y0, y1, x0, x1),
+        "keep": keep,
     }
 
 
