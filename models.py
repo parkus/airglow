@@ -372,3 +372,38 @@ def fit_gp_1d(x, y, yerr=None, smoothing=1.0, white_noise=1e-6, fit_white_noise=
     mean, _ = gp.predict(y, x, return_var=True)
     return gp, mean
 
+
+def emd_decompose_1d(y, max_imf=None):
+    """
+    Perform empirical mode decomposition (EMD) on a 1D series.
+
+    Parameters
+    ----------
+    y : array-like
+        1D input series.
+    max_imf : int, optional
+        Maximum number of IMFs to extract.
+
+    Returns
+    -------
+    imfs : ndarray
+        Array of intrinsic mode functions (IMFs).
+    residue : ndarray
+        Residual after extracting IMFs.
+    """
+    try:
+        from PyEMD import EMD
+    except ImportError as exc:
+        raise ImportError(
+            "PyEMD is required for emd_decompose_1d. Install with `pip install EMD-signal`."
+        ) from exc
+
+    y = np.asarray(y, dtype=float)
+    emd = EMD()
+    if max_imf is not None:
+        imfs = emd.emd(y, max_imf=max_imf)
+    else:
+        imfs = emd.emd(y)
+    residue = y - np.sum(imfs, axis=0) if imfs.size else y
+    return imfs, residue
+
