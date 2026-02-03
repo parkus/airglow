@@ -413,7 +413,15 @@ def fit_poly_surface_2d(data, roi, order=2, mask=None, weights=None):
     }
 
 
-def fit_rbf_surface_2d(data, roi, mask=None, function="thin_plate", smooth=0.0, epsilon=None):
+def fit_rbf_surface_2d(
+    data,
+    roi,
+    mask=None,
+    function="thin_plate",
+    smooth=0.0,
+    epsilon=None,
+    subsample=None,
+):
     """
     Fit a 2D radial basis function (RBF) surface to an ROI.
 
@@ -432,6 +440,9 @@ def fit_rbf_surface_2d(data, roi, mask=None, function="thin_plate", smooth=0.0, 
         Smoothing parameter passed to scipy.interpolate.Rbf.
     epsilon : float, optional
         Shape parameter for some RBF kernels.
+    subsample : tuple or int, optional
+        If provided, fit the RBF on a subsampled grid within the ROI.
+        Use (ny, nx) to specify target grid size or an int for both axes.
 
     Returns
     -------
@@ -459,9 +470,26 @@ def fit_rbf_surface_2d(data, roi, mask=None, function="thin_plate", smooth=0.0, 
     if not np.any(keep):
         raise ValueError("No valid pixels to fit in the requested ROI.")
 
-    x = x_grid[keep]
-    y = y_grid[keep]
-    z = roi_data[keep]
+    if subsample is not None:
+        if isinstance(subsample, int):
+            subsample = (subsample, subsample)
+        if len(subsample) != 2:
+            raise ValueError("subsample must be an int or a (ny, nx) tuple.")
+        ny, nx = roi_data.shape
+        ny_sub, nx_sub = subsample
+        ny_sub = max(2, min(ny_sub, ny))
+        nx_sub = max(2, min(nx_sub, nx))
+        y_idx = np.linspace(0, ny - 1, ny_sub).round().astype(int)
+        x_idx = np.linspace(0, nx - 1, nx_sub).round().astype(int)
+        y_sub, x_sub = np.meshgrid(y_idx, x_idx, indexing="ij")
+        sub_mask = keep[y_sub, x_sub]
+        x = x_sub[sub_mask].ravel()
+        y = y_sub[sub_mask].ravel()
+        z = roi_data[y_sub, x_sub][sub_mask].ravel()
+    else:
+        x = x_grid[keep]
+        y = y_grid[keep]
+        z = roi_data[keep]
 
     if epsilon is None:
         rbf = Rbf(x, y, z, function=function, smooth=smooth)
