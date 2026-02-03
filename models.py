@@ -211,7 +211,7 @@ def fit_airglow_row(
         options=minimize_options,
     )
     fit = model_row(result.x)
-    return fit, result.x, keep
+    return fit, result.x, keep, result
 
 
 def fit_airglow_rows(
@@ -231,8 +231,7 @@ def fit_airglow_rows(
     minimize_options=None,
 ):
     """
-    Fit the broadened boxcar model for multiple rows, seeding each fit
-    with the previous row's best-fit parameters.
+    Fit the broadened boxcar model for multiple rows.
 
     Parameters
     ----------
@@ -250,8 +249,10 @@ def fit_airglow_rows(
         Bitwise mask value indicating bad pixels.
     lsf_kernel : array-like, optional
         LSF kernel for additional convolution.
-    init : tuple, optional
-        Initial parameter guess for the first row.
+    init : tuple or array-like, optional
+        Initial parameter guess for each row. If a 1D tuple/array is provided,
+        it will be used for every row. If a 2D array is provided, it must
+        have shape (N_rows, N_params).
     bounds : tuple, optional
         Bounds for parameters as (lower, upper).
     fit_fwhm : bool, optional
@@ -279,11 +280,22 @@ def fit_airglow_rows(
     fits = []
     params_list = []
     keeps = []
-    current_init = init
+    results = []
+
+    if init is not None:
+        init = np.asarray(init, dtype=float)
+        if init.ndim == 1:
+            init_list = [init for _ in range(rows.shape[0])]
+        elif init.ndim == 2 and init.shape[0] == rows.shape[0]:
+            init_list = [init[i] for i in range(rows.shape[0])]
+        else:
+            raise ValueError("init must be 1D or (N_rows, N_params).")
+    else:
+        init_list = [None for _ in range(rows.shape[0])]
 
     for i, row in enumerate(rows):
         dq_row = dq_rows[i] if dq_rows is not None else None
-        fit, params, keep = fit_airglow_row(
+        fit, params, keep, result = fit_airglow_row(
             row,
             x_grid,
             roi_x0,
@@ -291,7 +303,7 @@ def fit_airglow_rows(
             dq_row=dq_row,
             dq_mask_value=dq_mask_value,
             lsf_kernel=lsf_kernel,
-            init=current_init,
+            init=init_list[i],
             bounds=bounds,
             fit_fwhm=fit_fwhm,
             fixed_fwhm_g=fixed_fwhm_g,
@@ -301,8 +313,7 @@ def fit_airglow_rows(
         fits.append(fit)
         params_list.append(params)
         keeps.append(keep)
-        current_init = params
-
+        results.append(result)
     return {
         "fits": np.array(fits),
         "params": np.array(params_list),
