@@ -144,8 +144,7 @@ def fit_poly_surface_2d(data, roi, order=2, mask=None, weights=None):
 
     keep = np.isfinite(roi_data)
     if mask is not None:
-        roi_mask = np.asarray(mask, dtype=bool)[y0:y1, x0:x1]
-        keep &= ~roi_mask
+        keep &= ~mask
 
     if weights is not None:
         roi_weights = np.asarray(weights, dtype=float)[y0:y1, x0:x1]
@@ -183,7 +182,3 @@ def fit_poly_surface_2d(data, roi, order=2, mask=None, weights=None):
         "roi": (y0, y1, x0, x1),
         "keep": keep,
     }
-
-
-def infer_flat_field(flt, raw):
-    
