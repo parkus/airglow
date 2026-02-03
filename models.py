@@ -100,6 +100,7 @@ def fit_airglow_row(
     fit_fwhm=True,
     fixed_fwhm_g=1.0,
     fixed_fwhm_l=0.5,
+    minimize_options=None,
 ):
     """
     Fit a broadened boxcar airglow model to a single row within an ROI.
@@ -131,6 +132,8 @@ def fit_airglow_row(
         Fixed Gaussian FWHM when fit_fwhm is False.
     fixed_fwhm_l : float, optional
         Fixed Lorentzian FWHM when fit_fwhm is False.
+    minimize_options : dict, optional
+        Options passed to scipy.optimize.minimize.
 
     Returns
     -------
@@ -205,6 +208,7 @@ def fit_airglow_row(
         objective,
         x0=init,
         method="Nelder-Mead",
+        options=minimize_options,
     )
     fit = model_row(result.x)
     return fit, result.x, keep
@@ -224,6 +228,7 @@ def fit_airglow_rows(
     fit_fwhm=True,
     fixed_fwhm_g=1.0,
     fixed_fwhm_l=0.5,
+    minimize_options=None,
 ):
     """
     Fit the broadened boxcar model for multiple rows, seeding each fit
@@ -255,6 +260,8 @@ def fit_airglow_rows(
         Fixed Gaussian FWHM when fit_fwhm is False.
     fixed_fwhm_l : float, optional
         Fixed Lorentzian FWHM when fit_fwhm is False.
+    minimize_options : dict, optional
+        Options passed to scipy.optimize.minimize.
 
     Returns
     -------
@@ -289,6 +296,7 @@ def fit_airglow_rows(
             fit_fwhm=fit_fwhm,
             fixed_fwhm_g=fixed_fwhm_g,
             fixed_fwhm_l=fixed_fwhm_l,
+            minimize_options=minimize_options,
         )
         fits.append(fit)
         params_list.append(params)
