@@ -1,7 +1,5 @@
 import numpy as np
-from scipy import optimize
 from astropy.modeling.functional_models import Voigt1D
-from astropy.io import fits
 from matplotlib import pyplot as plt
 import utilities as utils
 
