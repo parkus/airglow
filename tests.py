@@ -4,6 +4,8 @@ import utilities as utils
 from airglow import MultiTraceAirglowModel
 from matplotlib import pyplot as plt
 
+
+
 def test_airglow_models(three_trace_files):
     import emcee
     import corner
