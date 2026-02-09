@@ -13,18 +13,15 @@ class MultiTraceAirglowModel(object):
     _1d_organization_string = (f"[param1_trace1, param1_trace2, ..., paramn_trace1, paramn_trace2] for an example with two "
                                f"traces.\nThe order of the grouped parmeters is {str(parameter_order)}.")
 
-    def __init__(self, wavegrids, dw_sample, plate_scale, tolerances, midpt_rng):
+    def __init__(self, pixgrids, tolerances, midpt_rng):
         """
         Initialize an AirglowModel to simultaneously model the airglow of multiple traces, intended for use with STIS
         modes that observe Lya.
 
         Parameters
         ----------
-        wavegrids : list of wavelength grids to be used in model evaluations during MCMC or other optimization
-        dw_sample : grid spacing for supersampling of the airglow profile
-        plate_scale : factor enabling scaling the slit width into a width in AA on the dispersion axis
-            This is the dispersion (AA/pixel) divided by the conventional plate scale (arcsec / pixel) yielding
-            units of AA/arcsec
+        pixgrids : list of pixel grids to be used in model evaluations during MCMC or other optimization.
+            Each grid is interpreted as pixel centers.
         tolerances : list of sigmas for priors tying the parameters of the fits to each trace to each other.
             constrains how tightly the various parameters of the fit to each trace will be pinned to each
             other during fitting. smaller values mean the fits to each trace will not be allowed to differ as much.
@@ -35,16 +32,9 @@ class MultiTraceAirglowModel(object):
         -------
         AirglowModel object
 
-        Notes
-        -----
-        At Lya for STIS/G140M the dispersion / plate scale ratio is 1.838 AA/arcsec according to the IHB and for
-        E140M it is 0.357 AA/arcsec
-        These values roughly agree with a visual inspection of _flt files.
         """
-        self.wavegrids = wavegrids
-        self.dw_sample = dw_sample
-        self.num_traces = len(wavegrids)
-        self.plate_scale = plate_scale
+        self.pixgrids = pixgrids
+        self.num_traces = len(pixgrids)
         self.tolerances = np.asarray(tolerances)
         self.midpt_rng = midpt_rng
 
@@ -52,9 +42,8 @@ class MultiTraceAirglowModel(object):
         slices = [slice(3*i, 3*(i+1)) for i in range(self.n_params_per_trace)]
         self.param_slices = dict(zip(self.parameter_order, slices))
 
-        # supersample the wavelength grids
-        self.wavesup = self._wave_supersample(wavegrids, dw_sample)
-        self.supbins = utils.mids2edges(self.wavesup)
+        # precompute bin edges for each trace
+        self.pixbins = [utils.mids2edges(pixgrid) for pixgrid in pixgrids]
 
         # setting these to None here mainly to enable introspection
         self.midpts = None
@@ -63,12 +52,6 @@ class MultiTraceAirglowModel(object):
         self.fwhm_Gs = None
         self.fwhm_Ls = None
         self.darkrates = None
-
-    def _wave_supersample(self, wavegrids, dw_sample):
-        # supersample the wavelength grid
-        wmin = min(min(wavegrid) for wavegrid in wavegrids)
-        wmax = max(max(wavegrid) for wavegrid in wavegrids)
-        return np.arange(wmin, wmax+dw_sample, dw_sample)
 
     # region convenience functions for parsing and setting parameters
     def tile_params(self, params_single_set):
@@ -123,7 +106,7 @@ class MultiTraceAirglowModel(object):
         return np.array(self.param_sets)
     # endregion
 
-    def evaluate(self, params=None, wavegrids=None, dw_sample=None):
+    def evaluate(self, params=None, pixgrids=None):
         """
         Generate airglow profiles for each trace on the pre-defined grid with the given parameters. This will update
         the parameters of the AirglowModel object in-place. If None, the object's current parameters are used.
@@ -140,42 +123,36 @@ class MultiTraceAirglowModel(object):
         """
         if params is not None:
             self.set_params(params)
-        if wavegrids is None:
-            wavegrids = self.wavegrids
-            wavesup = self.wavesup
-            supbins = self.supbins
+        if pixgrids is None:
+            pixgrids = self.pixgrids
+            pixbins_list = self.pixbins
         else:
-            wavesup = self._wave_supersample(wavegrids, dw_sample)
-            supbins = utils.mids2edges(wavesup)
-
-        # boxcar widths in AA based on plate scale
-        widths_AA = self.widths * self.plate_scale
-
-        # boxcars for the image of the aperture
-        yboxes = utils.boxcars_to_bins(self.midpts, widths_AA, self.fluxes, supbins)
+            pixbins_list = [utils.mids2edges(pixgrid) for pixgrid in pixgrids]
 
         # voigt profile for the natural and thermal broadening, convolve with boxcar
-        x_0 = 0
-        amplitude_Ls = 2 / (np.pi * self.fwhm_Ls)
-        voigt_span = 3 * (max(self.fwhm_Gs) + max(self.fwhm_Ls))
-        n = 2 * int(voigt_span // self.dw_sample) + 1 # ensures the grid is centered on 0
-        voigt_grid = np.linspace(-voigt_span, voigt_span, num=n)
-        nextra = len(voigt_grid) - len(self.wavesup)
-        if nextra > 0: # in case the sampler tries out a voigt profile larger than the range being fit
-            nclip = nextra // 2 + 1
-            voigt_grid = voigt_grid[nclip:-nclip]
-        sets = zip(yboxes, amplitude_Ls, self.fwhm_Ls, self.fwhm_Gs, self.darkrates)
         ys = []
-        for ybox, A, L, G, darkrate in sets:
-            yvoigt = voigt.evaluate(voigt_grid, x_0=x_0, amplitude_L=A, fwhm_L=L, fwhm_G=G)
+        for i, (pixgrid, pixbins) in enumerate(zip(pixgrids, pixbins_list)):
+            ybox = utils.boxcars_to_bins([self.midpts[i]], [self.widths[i]], [self.fluxes[i]], pixbins)[0]
+            voigt_span = 3 * (self.fwhm_Gs[i] + self.fwhm_Ls[i])
+            n = 2 * int(voigt_span) + 1  # ensures the grid is centered on 0
+            voigt_grid = np.linspace(-voigt_span, voigt_span, num=n)
+            nextra = len(voigt_grid) - len(pixgrid)
+            if nextra > 0:  # in case the sampler tries out a voigt profile larger than the range being fit
+                nclip = nextra // 2 + 1
+                voigt_grid = voigt_grid[nclip:-nclip]
+            yvoigt = voigt.evaluate(
+                voigt_grid,
+                x_0=0,
+                amplitude_L=1.0,
+                fwhm_L=self.fwhm_Ls[i],
+                fwhm_G=self.fwhm_Gs[i],
+            )
+            yvoigt = yvoigt / np.sum(yvoigt)
             y = np.convolve(ybox, yvoigt, mode='same')
-            y += darkrate
+            y += self.darkrates[i]
             ys.append(y)
 
-        # bin
-        ys_binned = [utils.bin_average(w, wavesup, y, left=None, right=None) for w, y in zip(wavegrids, ys)]
-
-        return ys_binned
+        return ys
     params_1d_to_2d.__doc__.format(_1d_organization_string)
 
     def loglike_tolerance_prior(self, params1d):
@@ -204,7 +181,7 @@ class MultiTraceAirglowModel(object):
             return -np.inf
         return 0
 
-    def __call__(self, wavegrids, dw_sample=None):
-        """Generate airglow profiles across the supplied wavegrid."""
-        return self.evaluate(params=None, wavegrids=wavegrids, dw_sample=dw_sample)
+    def __call__(self, pixgrids=None):
+        """Generate airglow profiles across the supplied pixel grids."""
+        return self.evaluate(params=None, pixgrids=pixgrids)
 

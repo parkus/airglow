@@ -1,9 +1,7 @@
 import numpy as np
 from astropy.io import fits
-import utilities as utils
 from airglow import MultiTraceAirglowModel
 from matplotlib import pyplot as plt
-
 
 
 def test_airglow_models(three_trace_files):
@@ -12,23 +10,22 @@ def test_airglow_models(three_trace_files):
     from scipy.special import gamma
 
     # load the data and put it into lists
-    fit_range = [1213, 1218]
-    waves = []
-    wavegrids = []
+    fit_range = [325, 475]
+    pixgrids = []
     fluxes = []
     errors = []
     counts = []
     cts_per_flux_factors = []
     for file in three_trace_files:
         h = fits.open(file)
-        w, f, e, cps = [h[1].data[s][0] for s in ['wavelength', 'flux', 'error', 'gross']]
+        f, e, cps = [h[1].data[s][0] for s in ['flux', 'error', 'gross']]
+        x = np.arange(len(f)) + 1
+        keep = (x < fit_range[0]) & (x > fit_range[1])
         exptime = h[1].header['exptime']
-        keep = (w > fit_range[0]) & (w < fit_range[1])
         fluxes.append(f[keep])
         errors.append(e[keep])
-        waves.append(w[keep])
-        wgrid = utils.mids2edges(w[keep])
-        wavegrids.append(wgrid)
+        pixgrid = np.arange(np.sum(keep), dtype=float)
+        pixgrids.append(pixgrid)
 
         # record factor to estimate counts for a given flux
         cts = cps * exptime
@@ -44,15 +41,26 @@ def test_airglow_models(three_trace_files):
 
     sets = ((10, 'loose tolerances'),
             (0.001, 'tight tolerances'))
+    min_len = min(len(pixgrid) for pixgrid in pixgrids)
+    centers = [
+        np.average(pixgrid, weights=flux) if np.any(flux > 0) else np.median(pixgrid)
+        for pixgrid, flux in zip(pixgrids, fluxes)
+    ]
+    center_guess = float(np.mean(centers))
+    half_width = max(2.0, 0.05 * min_len)
+    midpt_rng = [center_guess - half_width, center_guess + half_width]
+
     for tol_rel, tol_label in sets:
 
         # set up a model with tight tolerances
         tolerances = np.array([0.1, 0.2, 4e-14, 0.2, 0.1, 1.0e-16]) * tol_rel
-        model = MultiTraceAirglowModel(wavegrids, 0.01, 1.838,
-                             tolerances=tolerances, midpt_rng=[1215.3, 1216.3])
+        model = MultiTraceAirglowModel(
+            pixgrids,
+            tolerances=tolerances,
+            midpt_rng=midpt_rng,
+        )
 
         ctstack = np.hstack(counts)
-        errorstack = np.hstack(errors)
         cts_per_flux_stack = np.hstack(cts_per_flux_factors)
         def loglike(params):
             physical_prior = model.loglike_physical_prior(params)
@@ -78,9 +86,9 @@ def test_airglow_models(three_trace_files):
 
         np.random.seed(42)
 
-        p0_2d = np.array(((1215.6, 2.0, 4e-14, 0.1, 0.3, 1.0e-16),
-                          (1215.6, 2.0, 4e-14, 0.1, 0.3, 1.0e-16),
-                          (1215.6, 2.0, 4e-14, 0.1, 0.3, 1.0e-16)))
+        p0_2d = np.array(((center_guess, 2.0, 4e-14, 0.1, 0.3, 1.0e-16),
+                          (center_guess, 2.0, 4e-14, 0.1, 0.3, 1.0e-16),
+                          (center_guess, 2.0, 4e-14, 0.1, 0.3, 1.0e-16)))
         p0 = model.params_2d_to_1d(p0_2d)
         jitter_amplitude = np.tile((0.01, 0.01, 1e-15, 0.01, 0.01, 1e-18), (3,1))
         jitter_amplitude = model.params_2d_to_1d(jitter_amplitude)
@@ -105,8 +113,8 @@ def test_airglow_models(three_trace_files):
         # plot median fits
         p_median = np.median(sampler.flatchain, axis=0)
         ys = model.evaluate(p_median)
-        for i, (wave, flux, y) in enumerate(zip(waves, fluxes, ys)):
+        for i, (pixgrid, flux, y) in enumerate(zip(pixgrids, fluxes, ys)):
             plt.figure()
-            plt.step(wave, flux, where='mid')
-            plt.step(wave, y, where='mid')
+            plt.step(pixgrid, flux, where='mid')
+            plt.step(pixgrid, y, where='mid')
             plt.title(f'{tol_label} | trace {i+1}')

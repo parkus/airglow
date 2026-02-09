@@ -104,5 +104,7 @@ def boxcars_to_bins(midpoints, widths, heights, bin_edges):
 
     bin_areas = overlap_widths * heights  # shape (M, N)
 
-    return bin_areas
+    bin_avgs = bin_areas / np.diff(bin_edges)
+
+    return bin_avgs
 
