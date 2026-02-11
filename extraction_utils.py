@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import copy
 from pathlib import Path
-from re import X
+from tempfile import TemporaryDirectory
 
 import numpy as np
 from astropy.io import fits
@@ -59,7 +59,7 @@ def get_default_traceloc(fltfile: Path) -> float | None:
 
 def _get_column(data, name: str):
     if data is None or not hasattr(data, "names") or data.names is None:
-        return None
+        raise ValueError("data is None or does not have a names attribute.")
     name_lower = name.lower()
     for col in data.names:
         if col.lower() == name_lower:
@@ -271,3 +271,440 @@ def plot_extraction_locations(
         ax.legend(loc="lower right")
 
     return fig, ax
+
+
+def get_flt_y_positions(
+    fltfile: Path,
+    step: float,
+    y_min: float | None = None,
+    y_max: float | None = None,
+) -> np.ndarray:
+    data = fits.getdata(fltfile, 1)
+    nrows = data.shape[0]
+    y_min = 0.5 if y_min is None else y_min
+    y_max = (nrows - 0.5) if y_max is None else y_max
+    if step <= 0:
+        raise ValueError("step must be positive.")
+    return np.arange(y_min, y_max + 1e-6, step, dtype=float)
+
+
+def _read_spectrum_from_x1d(x1dfile: Path, column: str = "flux") -> np.ndarray:
+    x1d = fits.getdata(x1dfile, 1)
+    spectrum = _get_column(x1d, column)
+    if spectrum is None:
+        raise KeyError(f"Column '{column}' not found in {x1dfile.name}.")
+    if np.ndim(spectrum) > 1:
+        spectrum = spectrum[0]
+    return np.asarray(spectrum, dtype=float)
+
+
+def _read_wavelength_from_x1d(x1dfile: Path) -> np.ndarray:
+    x1d = fits.getdata(x1dfile, 1)
+    wavelength = _get_column(x1d, "wavelength")
+    if wavelength is None:
+        raise KeyError(f"Column 'wavelength' not found in {x1dfile.name}.")
+    if np.ndim(wavelength) > 1:
+        wavelength = wavelength[0]
+    return np.asarray(wavelength, dtype=float)
+
+
+def _get_sci_table(hdul: fits.HDUList) -> fits.BinTableHDU:
+    if "SCI" in hdul:
+        return hdul["SCI"]
+    return hdul[1]
+
+
+def extract_x1d_grid(
+    fltfile: Path,
+    y_positions: np.ndarray,
+    output_dir: Path,
+    x1d_params: dict = default_x1d_params,
+) -> list[Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    x1d_files = []
+    for idx, y in enumerate(y_positions):
+        out = output_dir / f"{fltfile.stem}_y{idx:04d}_x1d.fits"
+        stis.x1d.x1d(str(fltfile), str(out), a2center=float(y), **x1d_params)
+        x1d_files.append(out)
+    return x1d_files
+
+
+def collate_trace_spectra(
+    x1d_files: list[Path],
+    column: str = "flux",
+) -> tuple[np.ndarray, np.ndarray]:
+    if not x1d_files:
+        raise ValueError("x1d_files is empty.")
+    wavelength = _read_wavelength_from_x1d(x1d_files[0])
+    spectra = []
+    for x1dfile in x1d_files:
+        spectrum = _read_spectrum_from_x1d(x1dfile, column=column)
+        if spectrum.shape != wavelength.shape:
+            raise ValueError(f"Spectrum shape mismatch for {x1dfile.name}.")
+        spectra.append(spectrum)
+    return np.asarray(spectra, dtype=float), wavelength
+
+
+def collate_trace_table(x1d_files: list[Path]) -> fits.BinTableHDU:
+    if not x1d_files:
+        raise ValueError("x1d_files is empty.")
+
+    with fits.open(x1d_files[0]) as hdul:
+        base_table = _get_sci_table(hdul)
+        columns = base_table.columns
+        header = base_table.header.copy()
+
+    data_per_col: dict[str, list[np.ndarray]] = {col.name: [] for col in columns}
+    for x1dfile in x1d_files:
+        with fits.open(x1dfile) as hdul:
+            table = _get_sci_table(hdul).data
+            for col in columns:
+                values = table[col.name]
+                if np.ndim(values) > 1:
+                    values = values[0]
+                data_per_col[col.name].append(values)
+
+    coldefs = []
+    for col in columns:
+        array = np.asarray(data_per_col[col.name])
+        coldefs.append(
+            fits.Column(
+                name=col.name,
+                format=col.format,
+                dim=col.dim,
+                unit=col.unit,
+                array=array,
+            )
+        )
+
+    header["EXTNAME"] = "TRACES"
+    return fits.BinTableHDU.from_columns(fits.ColDefs(coldefs), header=header, name="TRACES")
+
+
+def _robust_sigma_from_mad(values: np.ndarray, axis: int = 0) -> np.ndarray:
+    median = np.nanmedian(values, axis=axis)
+    mad = np.nanmedian(np.abs(values - median), axis=axis)
+    return 1.4826 * mad
+
+
+def _weighted_centroid(values: np.ndarray, x: np.ndarray) -> float:
+    valid = np.isfinite(values)
+    if not np.any(valid):
+        return np.nan
+    baseline = np.nanmedian(values[valid])
+    weights = values - baseline
+    weights = np.where(weights > 0, weights, 0.0)
+    weight_sum = np.nansum(weights)
+    if weight_sum <= 0:
+        weight_sum = np.nansum(values[valid])
+        if weight_sum <= 0:
+            return np.nan
+        weights = values
+    return float(np.nansum(x * weights) / weight_sum)
+
+
+def estimate_background_sigma_from_traces(
+    trace_stack: np.ndarray,
+    wavelength_stack: np.ndarray | None = None,
+    y_positions: np.ndarray | None = None,
+    y_windows: list[tuple[float, float]] | None = None,
+    centroid_stack: np.ndarray | None = None,
+    align_centroids: bool = False,
+) -> dict:
+    trace_stack = np.asarray(trace_stack, dtype=float)
+    if trace_stack.ndim != 2:
+        raise ValueError("trace_stack must be 2D (n_traces, n_pixels).")
+
+    n_traces, n_pix = trace_stack.shape
+    if wavelength_stack is None:
+        wavelength_stack = np.tile(np.arange(n_pix, dtype=float), (n_traces, 1))
+    else:
+        wavelength_stack = np.asarray(wavelength_stack, dtype=float)
+        if wavelength_stack.shape != trace_stack.shape:
+            raise ValueError("wavelength_stack must match trace_stack shape.")
+
+    if y_windows:
+        if y_positions is None:
+            y_positions = np.arange(n_traces, dtype=float)
+        y_positions = np.asarray(y_positions, dtype=float)
+        if y_positions.shape[0] != n_traces:
+            raise ValueError("y_positions must match trace_stack length.")
+        windows = [(min(y0, y1), max(y0, y1)) for y0, y1 in y_windows]
+        selected = np.zeros(n_traces, dtype=bool)
+        for y0, y1 in windows:
+            selected |= (y_positions >= y0) & (y_positions <= y1)
+    else:
+        selected = np.ones(n_traces, dtype=bool)
+
+    if not np.any(selected):
+        raise ValueError("No traces selected with the provided y_windows.")
+
+    traces = trace_stack[selected]
+    wavelengths = wavelength_stack[selected]
+    centroid_source = traces
+    if centroid_stack is not None:
+        centroid_stack = np.asarray(centroid_stack, dtype=float)
+        if centroid_stack.shape != trace_stack.shape:
+            raise ValueError("centroid_stack must match trace_stack shape.")
+        centroid_source = centroid_stack[selected]
+
+    centroids = np.array(
+        [_weighted_centroid(values, wave) for values, wave in zip(centroid_source, wavelengths)],
+        dtype=float,
+    )
+    target_centroid = np.nanmedian(centroids)
+    shifts = centroids - target_centroid
+
+    if align_centroids:
+        shifted_wavelengths = wavelengths - shifts[:, None]
+    else:
+        shifted_wavelengths = wavelengths
+
+    common_grid = shifted_wavelengths[len(shifted_wavelengths) // 2]
+    aligned = np.vstack(
+        [
+            np.interp(common_grid, wave, trace, left=np.nan, right=np.nan)
+            for wave, trace in zip(shifted_wavelengths, traces)
+        ]
+    )
+
+    median = np.nanmedian(aligned, axis=0)
+    sigma = _robust_sigma_from_mad(aligned, axis=0)
+
+    return {
+        "aligned_traces": aligned,
+        "aligned_median": median,
+        "aligned_sigma": sigma,
+        "centroids": centroids,
+        "target_centroid": target_centroid,
+        "shifts": shifts,
+        "selected_mask": selected,
+        "common_wavelength": common_grid,
+    }
+
+
+def _get_trace_y_positions(hdul: fits.HDUList) -> np.ndarray | None:
+    if "traces" in hdul:
+        return np.asarray(hdul["traces"].data["a2center"], dtype=float)
+    raise KeyError("Column 'a2center' not found in traces extension.")
+
+
+def _build_revised_error_column(table_hdu: fits.BinTableHDU, sigma: np.ndarray, name: str = "ERROR_EMPIRICAL") -> fits.ColDefs:
+    error_col = None
+    for col in table_hdu.columns:
+        if col.name.lower() == "error":
+            error_col = col
+            break
+
+    if error_col is None:
+        raise KeyError("Column 'ERROR' not found in x1d table.")
+
+    error_data = table_hdu.data[error_col.name]
+    if np.ndim(error_data) > 1:
+        n_rows = error_data.shape[0]
+        revised = np.tile(sigma, (n_rows, 1)).astype(np.float32)
+    else:
+        revised = np.asarray(sigma, dtype=np.float32)
+
+    new_col = fits.Column(
+        name=name,
+        format=error_col.format,
+        dim=error_col.dim,
+        array=revised,
+    )
+
+    # Filter out any pre-existing column with the same name (idempotent).
+    existing_cols = fits.ColDefs(
+        [c for c in table_hdu.columns if c.name.upper() != name.upper()]
+    )
+    return existing_cols + new_col
+
+
+def revise_background_error_in_x1d(
+    x1dfile: Path,
+    output_x1d: Path | None = None,
+    y_windows: tuple[int, int] | None = None,
+    align_centroids: bool = False,
+) -> dict:
+
+    with fits.open(x1dfile) as hdul:
+        if "TRACES" not in hdul:
+            raise KeyError("TRACES extension not found in x1d file.")
+
+        trace_table = hdul["TRACES"].data
+        if trace_table is None:
+            raise ValueError("TRACES extension has no data.")
+
+        trace_background = None
+        if trace_table.dtype.fields:
+            trace_background = _get_column(trace_table, "background")
+
+        trace_data = _get_column(trace_table, "flux")
+        if trace_data is None:
+            raise KeyError("TRACES table missing 'BACKGROUND' and 'FLUX' columns.")
+        trace_data = np.asarray(trace_data, dtype=float)
+        if trace_data.ndim != 2:
+            raise ValueError(f"Expected 2D traces array, got shape {trace_data.shape}.")
+
+        wavelength_stack = _get_column(trace_table, "wavelength")
+        if wavelength_stack is not None:
+            wavelength_stack = np.asarray(wavelength_stack, dtype=float)
+            if wavelength_stack.shape != trace_data.shape:
+                raise ValueError("TRACES wavelength shape does not match traces.")
+
+        n_traces = trace_data.shape[0]
+        y_positions = _get_trace_y_positions(hdul)
+        if y_positions is None:
+            y_positions = np.arange(n_traces, dtype=float)
+        else:
+            y_positions = np.asarray(y_positions, dtype=float)
+            if y_positions.shape[0] != n_traces:
+                raise ValueError("TRACE_Y length does not match trace stack.")
+
+        science_data = hdul[1].data
+        science_center = _get_column(science_data, "a2center")
+        if science_center is not None and np.ndim(science_center):
+            science_center = float(science_center[0])
+        elif science_center is not None:
+            science_center = float(science_center)
+
+        result = estimate_background_sigma_from_traces(
+            trace_stack=trace_data,
+            wavelength_stack=wavelength_stack,
+            y_positions=y_positions,
+            y_windows=y_windows,
+            centroid_stack=trace_background,
+            align_centroids=align_centroids,
+        )
+
+        sigma = result["aligned_sigma"]
+        common_wavelength = result["common_wavelength"]
+
+        sci_wavelength = _get_column(science_data, "wavelength")
+        if sci_wavelength is not None:
+            sci_wave = np.asarray(sci_wavelength, dtype=float)
+            if sci_wave.ndim > 1:
+                sci_wave = sci_wave[0]
+            sci_wave = np.atleast_1d(sci_wave)
+            sigma = np.interp(
+                sci_wave,
+                common_wavelength,
+                sigma,
+                left=np.nan,
+                right=np.nan,
+            ).astype(np.float32)
+
+        sci_hdu = hdul["SCI"] if "SCI" in hdul else hdul[1]
+        cols = _build_revised_error_column(sci_hdu, sigma, name="ERROR_EMPIRICAL")
+        new_table_hdu = fits.BinTableHDU.from_columns(cols, header=sci_hdu.header, name=sci_hdu.name)
+
+        new_hdul = fits.HDUList([hdu.copy() for hdu in hdul])
+        new_hdul[1] = new_table_hdu
+
+    if output_x1d is None:
+        output_x1d = x1dfile.with_name(x1dfile.stem + "_revised_error" + x1dfile.suffix)
+    new_hdul.writeto(output_x1d, overwrite=True)
+
+    return output_x1d
+
+
+def _compute_trace_overlap_mask(
+    trace_centers: np.ndarray,
+    trace_extrsize: float,
+    science_center: float,
+    science_extrsize: float,
+) -> np.ndarray:
+    half_trace = trace_extrsize / 2.0
+    half_science = science_extrsize / 2.0
+    trace_min = trace_centers - half_trace
+    trace_max = trace_centers + half_trace
+    science_min = science_center - half_science
+    science_max = science_center + half_science
+    overlaps = (trace_min <= science_max) & (trace_max >= science_min)
+    return overlaps.astype(np.uint8)[:, None]
+
+
+def add_traces_to_x1d(
+    science_x1d: Path,
+    output_x1d: Path,
+    trace_table: fits.BinTableHDU,
+    trace_mask: np.ndarray,
+) -> Path:
+    with fits.open(science_x1d) as hdul:
+        new_hdul = fits.HDUList([hdu.copy() for hdu in hdul])
+
+    for name in ("TRACES", "TRACE_MASK"):
+        if name in new_hdul:
+            idx = new_hdul.index_of(name)
+            new_hdul.pop(idx)
+
+    mask_col = fits.Column(
+        name="TRACE_MASK",
+        format="1B",
+        array=np.asarray(trace_mask, dtype=np.uint8),
+    )
+    trace_table = fits.BinTableHDU.from_columns(
+        trace_table.columns + mask_col,
+        header=trace_table.header,
+        name="TRACES",
+    )
+    new_hdul.append(trace_table)
+    new_hdul.writeto(output_x1d, overwrite=True)
+    return output_x1d
+
+
+def build_trace_stack_x1d(
+    fltfile: Path,
+    output_x1d: Path,
+    step: float,
+    x1d_params: dict = default_x1d_params,
+    spectrum_column: str = "flux",
+    y_min: float | None = None,
+    y_max: float | None = None,
+) -> dict:
+    y_positions = get_flt_y_positions(fltfile, step=step, y_min=y_min, y_max=y_max)
+    with TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        x1d_files = extract_x1d_grid(
+            fltfile=fltfile,
+            y_positions=y_positions,
+            output_dir=tmp_path,
+            x1d_params=x1d_params,
+        )
+        trace_table = collate_trace_table(x1d_files)
+
+    science_x1d = ensure_x1d(fltfile, force=False, x1d_params=x1d_params)
+    science_data = fits.getdata(science_x1d, 1)
+    science_center = _get_column(science_data, "a2center")
+    if science_center is None:
+        raise KeyError("Column 'a2center' not found in science x1d.")
+    if np.ndim(science_center):
+        science_center = float(science_center[0])
+    else:
+        science_center = float(science_center)
+
+    science_extrsize = x1d_params.get("extrsize", None)
+    if science_extrsize is None:
+        raise KeyError("extrsize not found in x1d_params.")
+
+    trace_mask = _compute_trace_overlap_mask(
+        trace_centers=y_positions,
+        trace_extrsize=float(x1d_params["extrsize"]),
+        science_center=science_center,
+        science_extrsize=float(science_extrsize),
+    )
+    add_traces_to_x1d(
+        science_x1d=science_x1d,
+        output_x1d=output_x1d,
+        trace_table=trace_table,
+        trace_mask=trace_mask,
+    )
+    trace_spectra = _get_column(trace_table.data, spectrum_column)
+    wavelength = _get_column(trace_table.data, "wavelength")
+    return {
+        "output_x1d": output_x1d,
+        "y_positions": y_positions,
+        "wavelength": wavelength,
+        "trace_spectra": trace_spectra,
+        "trace_mask": trace_mask,
+    }
