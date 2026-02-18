@@ -17,23 +17,13 @@ DEFAULT_TRACE_Y: float | None = None
 x_center = 512.5
 
 def find_test_data_dir() -> Path:
-    """Locate the test-data directory. Checks AIRGLOW_TEST_DATA env var, then cwd-relative paths."""
-    import os
-    env_path = os.environ.get("AIRGLOW_TEST_DATA")
-    if env_path:
-        td = Path(env_path).resolve()
-        if td.exists():
-            return td
     cwd = Path.cwd().resolve()
     candidates = [cwd, cwd.parent, cwd.parent.parent]
     for base in candidates:
         td = base / "test-data"
         if td.exists():
             return td
-    raise FileNotFoundError(
-        "Could not locate test-data directory. Set AIRGLOW_TEST_DATA environment variable "
-        "or run from the repository root (or notebooks/) where test-data exists."
-    )
+    raise FileNotFoundError("Could not locate test-data directory from current working dir")
 
 
 default_x1d_params = dict(
@@ -44,11 +34,6 @@ default_x1d_params = dict(
     bk1size=20,
     bk2size=20,
 )
-
-
-def get_x1d_trace_params(params: dict | None = None) -> dict:
-    """Return a copy of x1d parameters for trace extraction. For notebook compatibility."""
-    return copy(default_x1d_params) if params is None else copy(params)
 
 
 def ensure_x1d(fltfile: Path, force: bool = False, x1d_params: dict = default_x1d_params) -> Path:
@@ -499,8 +484,8 @@ def estimate_background_sigma_from_traces(
 
 
 def _get_trace_y_positions(hdul: fits.HDUList) -> np.ndarray | None:
-    if "TRACES" in hdul:
-        return np.asarray(hdul["TRACES"].data["a2center"], dtype=float)
+    if "traces" in hdul:
+        return np.asarray(hdul["traces"].data["a2center"], dtype=float)
     raise KeyError("Column 'a2center' not found in traces extension.")
 
 
