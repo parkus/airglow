@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from copy import copy
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -18,7 +19,6 @@ x_center = 512.5
 
 def find_test_data_dir() -> Path:
     """Locate the test-data directory. Checks AIRGLOW_TEST_DATA env var, then cwd-relative paths."""
-    import os
     env_path = os.environ.get("AIRGLOW_TEST_DATA")
     if env_path:
         td = Path(env_path).resolve()
